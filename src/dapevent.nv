@@ -1,0 +1,379 @@
+// dapevent.nv — what the adapter says without being asked.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// AN EVENT IS NOT A NOTIFICATION
+//
+// It carries a `seq` of its own, drawn from the adapter's sequence, and
+// it is never answered.  It only ever goes from the adapter to the
+// client.  An adapter that numbered only its responses sends events
+// whose `seq` repeats, and a client keeping a log of the session cannot
+// order it.
+//
+// `stopped` IS THE EVENT THE SESSION TURNS ON
+//
+// Everything a user sees while debugging follows a `stopped` event: the
+// client asks for threads, then a stack trace, then scopes, then
+// variables, and draws all of it.  Three fields decide whether that
+// works.
+//
+// `reason` is why — `"breakpoint"`, `"step"`, `"exception"`,
+// `"pause"` — and the client shows it.
+//
+// `thread_id` is WHICH THREAD, and everything afterwards is asked about
+// that thread.  An adapter that omitted it leaves the client guessing,
+// and the client's guess is usually the first thread it knows about.
+//
+// `all_threads_stopped` says whether the OTHER threads are stopped too.
+// It changes what the client may ask: with it false, a stack trace of
+// another thread is a request about a thread that is still running, and
+// the answer is torn.  An adapter that left it false when it had
+// stopped everything makes a debugger that can only ever show one
+// thread.
+//
+// `output` CARRIES THE PROGRAM's OWN OUTPUT, AND ITS CATEGORY DECIDES
+// WHERE IT GOES
+//
+// `"stdout"` and `"stderr"` are the program's streams and belong in the
+// user's terminal pane.  `"console"` is the ADAPTER talking, and belongs
+// in the debug console.  `"telemetry"` is not shown at all.  An adapter
+// that sent the program's stdout as `"console"` mixes its own messages
+// into the program's output, and a user cannot tell which is which.
+
+use dapbrk
+
+// An event this package types, or one it does not.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println(dapevent.event_name(DapStoppedEvent))         // stopped
+// ```
+pub enum DapEventKind
+    // `initialized`.  The adapter is ready for configuration.  THE
+    // TRAP: it arrives after `launch` was sent, not before, and the
+    // client sends its breakpoints in response to it.
+    DapInitializedEvent
+    // `stopped`.  Execution stopped.  Everything a user sees follows
+    // one of these.
+    DapStoppedEvent
+    // `continued`.  Execution resumed, and the adapter is telling the
+    // client — which happens when something other than the client
+    // resumed it.  EVERY VARIABLES REFERENCE IS NOW DEAD.
+    DapContinuedEvent
+    // `exited`.  The program exited, with a code.  The adapter may
+    // still be running.
+    DapExitedEvent
+    // `terminated`.  The session is over.  Distinct from `exited`: a
+    // program can exit and leave the adapter alive to be restarted,
+    // and an adapter can terminate a session whose program never
+    // started.
+    DapTerminatedEvent
+    // `thread`.  A thread started or exited.
+    DapThreadEvent
+    // `output`.  The program or the adapter produced output.
+    DapOutputEvent
+    // `breakpoint`.  A breakpoint changed — usually from unverified to
+    // verified, when the code it is in was finally loaded.
+    DapBreakpointEvent
+    // Anything else, carrying the name.
+    DapUnknownEvent(name: Str)
+
+// The body of a `stopped` event.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println(dapevent.stopped("breakpoint", 1).reason)     // breakpoint
+// ```
+pub struct DapStoppedBody
+    // Why: `"step"`, `"breakpoint"`, `"exception"`, `"pause"`,
+    // `"entry"`, `"goto"`, `"data breakpoint"`.  Shown to the user.
+    reason: Str
+    // Which thread stopped.  Everything the client asks next is about
+    // this thread, and an adapter that omitted it leaves the client
+    // guessing.
+    thread_id: Int
+    // A longer explanation for the user, or `""`: which exception was
+    // thrown, which condition was met.
+    description: Str
+    // Whether the other threads are stopped too.  With this false, a
+    // stack trace of another thread is a request about a thread that
+    // is still running.
+    all_threads_stopped: Bool
+    // The ids of the breakpoints that caused it, when the reason is
+    // `"breakpoint"`.  A client highlights the one that fired, which
+    // matters when several are on the same line.
+    hit_breakpoint_ids: [Int]
+
+// The body of an `output` event.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println(dapevent.output("stdout", "hello\n").category)
+// ```
+pub struct DapOutputBody
+    // Where it goes: `"stdout"`, `"stderr"`, `"console"`,
+    // `"telemetry"`.  The program's streams and the adapter's own
+    // messages are different things and belong in different panes.
+    category: Str
+    // The text, with its newlines.  NOT line-oriented: an adapter
+    // sends whatever it read, and a client that treated one event as
+    // one line breaks on a program that prints without a newline.
+    output: Str
+    // Where in the source this output came from, for a client that
+    // links it, or a source with no path and no reference when the
+    // adapter does not know.
+    source: dapbrk.DapSource
+    // The line in that source, or 0.
+    line: Int
+    // A reference to structured data the client may expand under the
+    // output line, or 0.  The same handle space as a variable's, and
+    // invalidated the same way.
+    variables_reference: Int
+
+// The body of an `exited` event.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.exited(0).exit_code}")            // 0
+// ```
+pub struct DapExitedBody
+    // The program's exit code.
+    exit_code: Int
+
+// The body of a `thread` event.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println(dapevent.thread_event("started", 2).reason)   // started
+// ```
+pub struct DapThreadBody
+    // `"started"` or `"exited"`.
+    reason: Str
+    // Which thread.
+    thread_id: Int
+
+// The body of a `breakpoint` event.
+//
+// ```novo
+// use dapbrk
+// use dapevent
+//
+// fn main() [io]
+//     let b = dapbrk.verified(1, dapbrk.source_path("/a.nv"), 12)
+//     println(dapevent.breakpoint_event("changed", b).reason)
+// ```
+pub struct DapBreakpointBody
+    // `"changed"`, `"new"` or `"removed"`.
+    reason: Str
+    // The breakpoint, with its `id` — which is the only thing tying
+    // the event to the breakpoint it is about.  An adapter that
+    // verifies lazily and assigned no ids sends events a client cannot
+    // act on.
+    breakpoint: dapbrk.DapBreakpoint
+
+// The event's name as the wire spells it.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println(dapevent.event_name(DapTerminatedEvent))      // terminated
+// ```
+pub fn event_name(k: DapEventKind) -> Str []
+    todo("dap-nv.dapevent.event_name")
+
+// The event a name denotes.
+//
+// Total: a name this package does not type answers `DapUnknownEvent`
+// carrying it.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     match dapevent.event_of("module")
+//         DapUnknownEvent(n) => println("not typed here: ${n}")
+//         _                  => println("typed")
+// ```
+pub fn event_of(name: Str) -> DapEventKind []
+    todo("dap-nv.dapevent.event_of")
+
+// A `stopped` body with the two fields that are always needed.
+//
+// `all_threads_stopped` defaults to FALSE, which is the conservative
+// answer: a client that believes only one thread stopped asks about
+// only that one, and asks too little rather than asking about a thread
+// that is still running.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.stopped("step", 1).all_threads_stopped}")   // false
+// ```
+pub fn stopped(reason: Str, thread_id: Int) -> DapStoppedBody []
+    todo("dap-nv.dapevent.stopped")
+
+// A `stopped` body saying every thread is stopped.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.stopped_all("pause", 1).all_threads_stopped}")   // true
+// ```
+pub fn stopped_all(reason: Str, thread_id: Int) -> DapStoppedBody []
+    todo("dap-nv.dapevent.stopped_all")
+
+// The same body with the breakpoints that fired.
+//
+// A client highlights the one that fired, which matters when several
+// are on the same line.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     let b = dapevent.with_hit_breakpoints(dapevent.stopped("breakpoint", 1), [3])
+//     println("${list.len(b.hit_breakpoint_ids)}")          // 1
+// ```
+pub fn with_hit_breakpoints(b: DapStoppedBody, ids: [Int]) -> DapStoppedBody []
+    todo("dap-nv.dapevent.with_hit_breakpoints")
+
+// An `output` body.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println(dapevent.output("stderr", "boom\n").output)
+// ```
+pub fn output(category: Str, text: Str) -> DapOutputBody []
+    todo("dap-nv.dapevent.output")
+
+// An `exited` body.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.exited(1).exit_code}")            // 1
+// ```
+pub fn exited(code: Int) -> DapExitedBody []
+    todo("dap-nv.dapevent.exited")
+
+// A `thread` body.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.thread_event("exited", 2).thread_id}")   // 2
+// ```
+pub fn thread_event(reason: Str, thread_id: Int) -> DapThreadBody []
+    todo("dap-nv.dapevent.thread_event")
+
+// A `breakpoint` body.
+//
+// ```novo
+// use dapbrk
+// use dapevent
+//
+// fn main() [io]
+//     let b = dapbrk.unverified("not loaded yet")
+//     println(dapevent.breakpoint_event("new", b).reason)   // new
+// ```
+pub fn breakpoint_event(reason: Str, b: dapbrk.DapBreakpoint) -> DapBreakpointBody []
+    todo("dap-nv.dapevent.breakpoint_event")
+
+// The output categories the specification defines, as the wire spells
+// them.
+//
+// ```novo
+// use std.list
+// use dapevent
+//
+// fn main() [io]
+//     println("${list.len(dapevent.output_categories())}")  // 4
+// ```
+pub fn output_categories() -> [Str] []
+    todo("dap-nv.dapevent.output_categories")
+
+// Whether an output category is the PROGRAM's own output rather than
+// the adapter's.
+//
+// True for `"stdout"` and `"stderr"`.  An adapter that sent the
+// program's stdout as `"console"` mixes its own messages into the
+// program's output, and a user cannot tell which is which.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.is_program_output("stdout")}")    // true
+//     println("${dapevent.is_program_output("console")}")   // false
+// ```
+pub fn is_program_output(category: Str) -> Bool []
+    todo("dap-nv.dapevent.is_program_output")
+
+// Whether an output category should be shown to the user at all.
+//
+// False for `"telemetry"`, which is for the client's own reporting.  An
+// adapter that put a telemetry payload in the debug console has shown a
+// user a blob of JSON.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.is_user_visible("telemetry")}")   // false
+// ```
+pub fn is_user_visible(category: Str) -> Bool []
+    todo("dap-nv.dapevent.is_user_visible")
+
+// Whether an event means every variables reference the client holds is
+// now dead.
+//
+// True for `continued` and for `stopped` — for `continued` because
+// execution resumed, and for `stopped` because it resumed and stopped
+// again.  A client that kept its expanded variable tree across either
+// shows a user a panel full of other values, and nothing reports an
+// error because the handles are valid and simply mean something else
+// now.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.invalidates_references(DapContinuedEvent)}")  // true
+//     println("${dapevent.invalidates_references(DapOutputEvent)}")     // false
+// ```
+pub fn invalidates_references(k: DapEventKind) -> Bool []
+    todo("dap-nv.dapevent.invalidates_references")
+
+// Whether an event means the session is over and nothing further should
+// be sent.
+//
+// True for `terminated` alone.  NOT for `exited`: the program exited
+// and the adapter may still be alive, waiting to be restarted, and a
+// client that shut the session down on an `exited` loses the restart.
+//
+// ```novo
+// use dapevent
+//
+// fn main() [io]
+//     println("${dapevent.ends_session(DapTerminatedEvent)}")   // true
+//     println("${dapevent.ends_session(DapExitedEvent)}")       // false
+// ```
+pub fn ends_session(k: DapEventKind) -> Bool []
+    todo("dap-nv.dapevent.ends_session")

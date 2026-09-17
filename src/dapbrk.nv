@@ -1,0 +1,307 @@
+// dapbrk.nv — where the user asked to stop, and where the adapter
+// actually stopped.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A BREAKPOINT MOVES, AND THE RESPONSE IS WHERE IT WENT
+//
+// The two types here are not two views of one thing.
+// `DapSourceBreakpoint` is what the CLIENT asked for: a line in a file.
+// `DapBreakpoint` is what the ADAPTER did about it, and the two differ
+// constantly — a breakpoint on a blank line or a comment is moved to
+// the next line that has code, a breakpoint in a function that was
+// inlined away is not verified at all, and a breakpoint in a file that
+// is not loaded yet is unverified now and verified later.
+//
+// The response's `verified` and its `line` are how the editor draws the
+// right marker in the right place.  An adapter that echoed the request
+// back shows a user a solid red dot on a line the debugger will never
+// reach.
+//
+// `setBreakpoints` REPLACES THE WHOLE FILE's SET
+//
+// There is no add and no remove.  Every `setBreakpoints` carries every
+// breakpoint the client wants in that source, and the ones it leaves
+// out are gone.  A client that sent one breakpoint to add one has just
+// deleted the others.
+//
+// The response's array corresponds ONE TO ONE, IN ORDER, with the
+// request's — that is the only thing that ties them together, because a
+// breakpoint has no identifier in the request.  An adapter that dropped
+// an unverifiable breakpoint from its response instead of returning it
+// unverified has shifted every breakpoint after it onto the wrong line.
+//
+// A SOURCE IS A PATH OR A REFERENCE, AND THE REFERENCE WINS
+//
+// `DapSource` may carry a filesystem path, a `source_reference`, or
+// both.  A non-zero `source_reference` means the content is NOT on disk
+// — generated code, a decompiled frame, an expression evaluated into
+// existence — and must be fetched with a `source` request.  When both
+// are present the reference wins, and a client that read the path
+// instead is showing the user a stale or unrelated file.
+
+// Where a breakpoint's source is.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println(dapbrk.source_path("/tmp/a.nv").path)
+// ```
+pub struct DapSource
+    // A short name for display, or `""` to let the client take the
+    // last segment of the path.
+    name: Str
+    // The filesystem path, or `""`.
+    path: Str
+    // Non-zero when the content is not on disk and must be fetched
+    // with a `source` request.  WINS over `path` when both are
+    // present: the path of generated code names a file that may not
+    // exist or may hold something else.
+    source_reference: Int
+
+// What the client asked for.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.source_breakpoint(42).line}")       // 42
+// ```
+pub struct DapSourceBreakpoint
+    // The line, one-based.  ONE-based, unlike almost everything in the
+    // Language Server Protocol, and a client that shared its line
+    // arithmetic between the two protocols is off by one in whichever
+    // it converted last.
+    line: Int
+    // The column, one-based, or 0 for "anywhere on the line".
+    column: Int
+    // An expression that must be true for the breakpoint to fire, or
+    // `""`.  The adapter must have declared
+    // `supports_conditional_breakpoints`.
+    condition: Str
+    // An expression over the hit count — `">5"`, `"%3"` — or `""`.
+    // The adapter must have declared
+    // `supports_hit_conditional_breakpoints`.
+    hit_condition: Str
+    // A message to log instead of stopping, or `""`.  A breakpoint
+    // with one of these does not stop the program: it prints and
+    // continues, which is what a user means by a tracepoint.
+    log_message: Str
+
+// What the adapter did about it.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.unverified("no code on that line").verified}")   // false
+// ```
+pub struct DapBreakpoint
+    // An identifier the adapter assigned, or 0.  Needed to match a
+    // later `breakpoint` event to the breakpoint it is about — an
+    // adapter that verifies breakpoints lazily sends those events, and
+    // without an id the client cannot tell which dot to fill in.
+    id: Int
+    // Whether the breakpoint is actually set.  False means the
+    // debugger will not stop here, and the client draws a hollow
+    // marker.
+    verified: Bool
+    // Why it is not verified, or `""`.  Shown to the user, so "no
+    // executable code on line 12" is worth writing and "failed" is not.
+    message: Str
+    // Where the breakpoint ACTUALLY is.  Present even when it equals
+    // the request's, because the client redraws from this and not from
+    // what it asked for.
+    source: DapSource
+    // The line it actually landed on, which may not be the one asked
+    // for.
+    line: Int
+    // The column it actually landed on, or 0.
+    column: Int
+
+// A source named by its path.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.source_path("/tmp/a.nv").source_reference}")   // 0
+// ```
+pub fn source_path(path: Str) -> DapSource []
+    todo("dap-nv.dapbrk.source_path")
+
+// A source that is not on disk, named by its reference.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.source_ref(7, "<generated>").source_reference}")   // 7
+// ```
+pub fn source_ref(reference: Int, name: Str) -> DapSource []
+    todo("dap-nv.dapbrk.source_ref")
+
+// Whether a source's content must be fetched with a `source` request
+// rather than read from disk.
+//
+// True when `source_reference` is non-zero, WHATEVER the path says.  A
+// client that checked the path first is showing the user a stale or
+// unrelated file.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.needs_fetch(dapbrk.source_ref(7, "x"))}")   // true
+//     println("${dapbrk.needs_fetch(dapbrk.source_path("/a.nv"))}") // false
+// ```
+pub fn needs_fetch(s: DapSource) -> Bool []
+    todo("dap-nv.dapbrk.needs_fetch")
+
+// Whether two sources name the same thing.
+//
+// By reference when either has one, and by path otherwise.  Two sources
+// with different references are different even when their paths match,
+// because two decompiled frames of the same file are two documents.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     let a = dapbrk.source_path("/a.nv")
+//     println("${dapbrk.same_source(a, a)}")                // true
+// ```
+pub fn same_source(a: DapSource, b: DapSource) -> Bool []
+    todo("dap-nv.dapbrk.same_source")
+
+// A plain breakpoint on a line.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.source_breakpoint(12).column}")     // 0
+// ```
+pub fn source_breakpoint(line: Int) -> DapSourceBreakpoint []
+    todo("dap-nv.dapbrk.source_breakpoint")
+
+// The same, with a condition.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println(dapbrk.conditional(12, "n > 4").condition)    // n > 4
+// ```
+pub fn conditional(line: Int, condition: Str) -> DapSourceBreakpoint []
+    todo("dap-nv.dapbrk.conditional")
+
+// A tracepoint: a breakpoint that logs and does not stop.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println(dapbrk.tracepoint(12, "n is {n}").log_message)
+// ```
+pub fn tracepoint(line: Int, message: Str) -> DapSourceBreakpoint []
+    todo("dap-nv.dapbrk.tracepoint")
+
+// Whether a breakpoint stops the program.
+//
+// False when it has a log message: that is a tracepoint, and the
+// program keeps running.  An adapter that stopped on one has stopped a
+// user who explicitly asked not to be.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.stops(dapbrk.tracepoint(1, "x"))}")     // false
+//     println("${dapbrk.stops(dapbrk.source_breakpoint(1))}")   // true
+// ```
+pub fn stops(b: DapSourceBreakpoint) -> Bool []
+    todo("dap-nv.dapbrk.stops")
+
+// Which capability a breakpoint needs, or `""` for one that needs
+// none.
+//
+// `"supportsConditionalBreakpoints"` for a condition,
+// `"supportsHitConditionalBreakpoints"` for a hit condition,
+// `"supportsLogPoints"` for a log message.  A client checks this before
+// it sends one, because an adapter that does not support it answers
+// `success: false` for the WHOLE request — and the whole request is
+// every breakpoint in the file.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("[${dapbrk.required_capability(dapbrk.source_breakpoint(1))}]")
+// ```
+pub fn required_capability(b: DapSourceBreakpoint) -> Str []
+    todo("dap-nv.dapbrk.required_capability")
+
+// A verified breakpoint at the line it actually landed on.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.verified(1, dapbrk.source_path("/a.nv"), 13).line}")
+// ```
+pub fn verified(id: Int, source: DapSource, line: Int) -> DapBreakpoint []
+    todo("dap-nv.dapbrk.verified")
+
+// An unverified breakpoint, with the reason.
+//
+// The reason is shown to the user, so "no executable code on line 12"
+// is worth writing and "failed" is not.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println(dapbrk.unverified("no executable code on line 12").message)
+// ```
+pub fn unverified(why: Str) -> DapBreakpoint []
+    todo("dap-nv.dapbrk.unverified")
+
+// Whether the adapter moved the breakpoint from where it was asked for.
+//
+// A client redraws from the response, so it needs to know when the
+// marker has to move — and a user whose breakpoint jumped two lines
+// without being told assumes the debugger is broken.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     let asked = dapbrk.source_breakpoint(12)
+//     let got = dapbrk.verified(1, dapbrk.source_path("/a.nv"), 13)
+//     println("${dapbrk.was_moved(asked, got)}")            // true
+// ```
+pub fn was_moved(asked: DapSourceBreakpoint, got: DapBreakpoint) -> Bool []
+    todo("dap-nv.dapbrk.was_moved")
+
+// Whether a response's breakpoints line up with the request's.
+//
+// The arrays must be the SAME LENGTH and correspond in order: that is
+// the only thing tying a result to a request, because a breakpoint has
+// no identifier going in.  An adapter that dropped an unverifiable
+// breakpoint rather than returning it unverified has shifted every
+// breakpoint after it onto the wrong line, and the client has no way to
+// tell.
+//
+// Worth asserting in an adapter's own tests, and worth checking in a
+// client before it redraws.
+//
+// ```novo
+// use dapbrk
+//
+// fn main() [io]
+//     println("${dapbrk.corresponds([], [])}")              // true
+// ```
+pub fn corresponds(asked: [DapSourceBreakpoint], got: [DapBreakpoint]) -> Bool []
+    todo("dap-nv.dapbrk.corresponds")

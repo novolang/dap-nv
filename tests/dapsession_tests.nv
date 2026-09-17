@@ -1,0 +1,388 @@
+// dapsession_tests.nv — the API suite for the handshake, the
+// breakpoints, the stack and the events.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: dap-nv.<module>.<fn>`.
+//
+// THE FOUR THINGS ASSERTED HERE THAT AN ADAPTER GETS WRONG ONCE EACH:
+// completing a launch before `configurationDone` arrives; echoing a
+// breakpoint request back instead of reporting where the breakpoint
+// landed; keeping a variables reference across a step; and treating
+// `exited` as the end of the session.
+
+use std.test
+use std.list
+use dapcmd
+use dapbrk
+use dapstack
+use dapevent
+
+@test
+fn test_the_configuration_handshake_is_four_steps_in_an_odd_order() [io]
+    // `initialized` is an EVENT and it arrives after `launch` was
+    // sent, not before.  An adapter that started the program on
+    // `launch` runs past every breakpoint the client had not sent yet,
+    // and only on a fast machine.
+    test.case("before initialize, only initialize")
+    test.assert(dapcmd.allows(DapBeforeInitialize, DapInitializeCmd))
+    test.assert(not dapcmd.allows(DapBeforeInitialize, DapLaunchCmd))
+    test.assert(not dapcmd.allows(DapBeforeInitialize, DapContinueCmd))
+
+    test.case("answering initialize allows launch")
+    let after_init = dapcmd.phase_after(DapBeforeInitialize, DapInitializeCmd)
+    test.assert(dapcmd.allows(after_init, DapLaunchCmd))
+    test.assert(dapcmd.allows(after_init, DapAttachCmd))
+
+    test.case("the initialized EVENT — not a command — opens configuration")
+    let configuring = dapcmd.phase_after_initialized_event(after_init)
+    test.assert(dapcmd.allows(configuring, DapSetBreakpointsCmd))
+    test.assert(dapcmd.allows(configuring, DapConfigurationDoneCmd))
+
+    test.case("and configurationDone starts ordinary traffic")
+    let running = dapcmd.phase_after(configuring, DapConfigurationDoneCmd)
+    test.assert(dapcmd.allows(running, DapContinueCmd))
+    test.assert(dapcmd.allows(running, DapStackTraceCmd))
+
+    test.case("after disconnect, nothing")
+    let gone = dapcmd.phase_after(running, DapDisconnectCmd)
+    test.assert(not dapcmd.allows(gone, DapContinueCmd))
+    test.assert(not dapcmd.allows(gone, DapThreadsCmd))
+
+@test
+fn test_a_launch_is_not_completed_until_configuration_is_done() [io]
+    let caps = dapcmd.default_capabilities()
+
+    test.case("while configuring, the adapter must wait")
+    test.assert(not dapcmd.may_complete_launch(DapConfiguring, caps))
+
+    test.case("and once running it may go")
+    test.assert(dapcmd.may_complete_launch(DapRunning, caps))
+
+@test
+fn test_the_command_names_round_trip_and_the_rest_keep_their_names() [io]
+    test.case("the names are the wire's")
+    test.assert(dapcmd.command_name(DapConfigurationDoneCmd) == "configurationDone")
+    test.assert(dapcmd.command_name(DapSetBreakpointsCmd) == "setBreakpoints")
+    test.assert(dapcmd.command_name(DapStepInCmd) == "stepIn")
+
+    test.case("and they parse back")
+    test.assert(dapcmd.command_name(dapcmd.command_of("evaluate")) == "evaluate")
+
+    test.case("a command this package does not type keeps its name")
+    match dapcmd.command_of("setExceptionBreakpoints")
+        DapUnknownCmd(n) => test.assert(n == "setExceptionBreakpoints")
+        _                => test.fail("that is not typed here")
+
+    test.case("and is_typed_command says so without a match")
+    test.assert(dapcmd.is_typed_command("threads"))
+    test.assert(not dapcmd.is_typed_command("setExceptionBreakpoints"))
+
+@test
+fn test_the_four_commands_that_resume_are_the_ones_that_invalidate() [io]
+    test.case("continue, next, stepIn and stepOut resume")
+    test.assert(dapcmd.resumes_execution(DapContinueCmd))
+    test.assert(dapcmd.resumes_execution(DapNextCmd))
+    test.assert(dapcmd.resumes_execution(DapStepInCmd))
+    test.assert(dapcmd.resumes_execution(DapStepOutCmd))
+
+    test.case("and nothing else does")
+    test.assert(not dapcmd.resumes_execution(DapThreadsCmd))
+    test.assert(not dapcmd.resumes_execution(DapVariablesCmd))
+    test.assert(not dapcmd.resumes_execution(DapEvaluateCmd))
+
+    test.case("the inspection commands need the program stopped")
+    test.assert(dapcmd.requires_stopped(DapVariablesCmd))
+    test.assert(dapcmd.requires_stopped(DapStackTraceCmd))
+    test.assert(dapcmd.requires_stopped(DapScopesCmd))
+    test.assert(dapcmd.requires_stopped(DapEvaluateCmd))
+
+    test.case("and threads does not, because a client asks it at any time")
+    test.assert(not dapcmd.requires_stopped(DapThreadsCmd))
+
+@test
+fn test_the_default_capabilities_claim_nothing() [io]
+    // A client that believed a false claim sends a request the adapter
+    // refuses, and the user sees a debugger that does not work rather
+    // than one that does less.
+    let c = dapcmd.default_capabilities()
+    test.assert(not c.supports_configuration_done)
+    test.assert(not c.supports_conditional_breakpoints)
+    test.assert(not c.supports_hit_conditional_breakpoints)
+    test.assert(not c.supports_evaluate_for_hovers)
+    test.assert(not c.supports_terminate_debuggee)
+    test.assert(not c.supports_delayed_stack_trace_loading)
+    test.assert(list.len(c.exception_filters) == 0)
+
+@test
+fn test_a_source_reference_wins_over_a_path() [io]
+    // A client that read the path instead is showing the user a stale
+    // or unrelated file.
+    test.case("a path alone is read from disk")
+    let onfile = dapbrk.source_path("/tmp/a.nv")
+    test.assert(not dapbrk.needs_fetch(onfile))
+    test.assert(onfile.source_reference == 0)
+
+    test.case("a reference means the content is not on disk")
+    test.assert(dapbrk.needs_fetch(dapbrk.source_ref(7, "<generated>")))
+
+    test.case("two sources with different references are different documents")
+    test.assert(not dapbrk.same_source(dapbrk.source_ref(7, "x"),
+                                       dapbrk.source_ref(8, "x")))
+
+    test.case("and the same path is the same source")
+    test.assert(dapbrk.same_source(onfile, dapbrk.source_path("/tmp/a.nv")))
+
+@test
+fn test_a_breakpoint_line_is_one_based() [io]
+    // Unlike almost everything in the Language Server Protocol.  A
+    // client that shared its line arithmetic between the two protocols
+    // is off by one in whichever it converted last.
+    test.case("the first line of a file is 1")
+    test.assert(dapbrk.source_breakpoint(1).line == 1)
+
+    test.case("and a breakpoint with no column means anywhere on the line")
+    test.assert(dapbrk.source_breakpoint(12).column == 0)
+
+@test
+fn test_a_tracepoint_does_not_stop_the_program() [io]
+    // An adapter that stopped on one has stopped a user who explicitly
+    // asked not to be.
+    test.case("a plain breakpoint stops")
+    test.assert(dapbrk.stops(dapbrk.source_breakpoint(12)))
+
+    test.case("a conditional one stops too")
+    test.assert(dapbrk.stops(dapbrk.conditional(12, "n > 4")))
+
+    test.case("and one with a log message does not")
+    test.assert(not dapbrk.stops(dapbrk.tracepoint(12, "n is {n}")))
+
+@test
+fn test_a_breakpoint_that_needs_a_capability_says_which() [io]
+    // An adapter that does not support it answers success:false for the
+    // WHOLE request, and the whole request is every breakpoint in the
+    // file.
+    test.case("a plain breakpoint needs none")
+    test.assert(dapbrk.required_capability(dapbrk.source_breakpoint(1)) == "")
+
+    test.case("a condition needs supportsConditionalBreakpoints")
+    test.assert(dapbrk.required_capability(dapbrk.conditional(1, "n > 4"))
+                == "supportsConditionalBreakpoints")
+
+    test.case("and a log message needs supportsLogPoints")
+    test.assert(dapbrk.required_capability(dapbrk.tracepoint(1, "x"))
+                == "supportsLogPoints")
+
+@test
+fn test_the_response_says_where_the_breakpoint_actually_landed() [io]
+    // An adapter that echoed the request back shows a user a solid red
+    // dot on a line the debugger will never reach.
+    let asked = dapbrk.source_breakpoint(12)
+
+    test.case("a breakpoint moved to the next line with code")
+    let moved = dapbrk.verified(1, dapbrk.source_path("/tmp/a.nv"), 13)
+    test.assert(moved.verified)
+    test.assert(moved.line == 13)
+    test.assert(dapbrk.was_moved(asked, moved))
+
+    test.case("one that landed where it was asked for did not move")
+    let same = dapbrk.verified(1, dapbrk.source_path("/tmp/a.nv"), 12)
+    test.assert(not dapbrk.was_moved(asked, same))
+
+    test.case("and an unverified breakpoint says why, for the user")
+    let no = dapbrk.unverified("no executable code on line 12")
+    test.assert(not no.verified)
+    test.assert(no.message == "no executable code on line 12")
+
+@test
+fn test_the_response_array_corresponds_one_to_one_with_the_request() [io]
+    // An adapter that dropped an unverifiable breakpoint rather than
+    // returning it unverified has shifted every breakpoint after it
+    // onto the wrong line, and the client has no way to tell.
+    let asked = [dapbrk.source_breakpoint(1), dapbrk.source_breakpoint(2)]
+    let source = dapbrk.source_path("/tmp/a.nv")
+
+    test.case("two in, two out")
+    test.assert(dapbrk.corresponds(asked, [dapbrk.verified(1, source, 1),
+                                           dapbrk.unverified("not loaded")]))
+
+    test.case("two in, one out is a dropped breakpoint")
+    test.assert(not dapbrk.corresponds(asked, [dapbrk.verified(1, source, 1)]))
+
+    test.case("and two empty lists correspond")
+    test.assert(dapbrk.corresponds([], []))
+
+@test
+fn test_a_variables_reference_of_zero_is_a_leaf() [io]
+    test.case("a leaf has nothing to expand")
+    let n = dapstack.leaf("n", "4", "Int")
+    test.assert(n.variables_reference == 0)
+    test.assert(not dapstack.is_expandable(n))
+
+    test.case("a value with a reference does")
+    test.assert(dapstack.is_expandable(dapstack.variable("xs", "[1, 2]", 9)))
+
+    test.case("zero is a sentinel, not an identifier")
+    test.assert(not dapstack.is_live_reference(0))
+    test.assert(dapstack.is_live_reference(9))
+
+@test
+fn test_named_and_indexed_children_are_counted_separately() [io]
+    // A client pages an array of a million elements and lists a
+    // struct's fields whole.
+    test.case("an array's children are indexed")
+    let xs = dapstack.structured("xs", "[…]", 9, 0, 1000000)
+    test.assert(xs.indexed_variables == 1000000)
+    test.assert(xs.named_variables == 0)
+
+    test.case("a struct's are named")
+    let p = dapstack.structured("p", "Point { … }", 10, 2, 0)
+    test.assert(p.named_variables == 2)
+    test.assert(p.indexed_variables == 0)
+
+    test.case("and a variable can carry the expression that reaches it")
+    test.assert(dapstack.with_evaluate_name(
+        dapstack.leaf("x", "4", "Int"), "self.x").evaluate_name == "self.x")
+
+@test
+fn test_a_thread_id_is_stable_and_a_frame_id_is_not() [io]
+    // The exception to the handle rule, and the reason a client can
+    // keep a thread selected across a step.
+    test.case("a thread is an id and a name")
+    let t = dapstack.thread(1, "main")
+    test.assert(t.id == 1)
+    test.assert(t.name == "main")
+
+    test.case("a frame carries its own id, its name and its line")
+    let f = dapstack.stack_frame(3, "main", 12)
+    test.assert(f.id == 3)
+    test.assert(f.line == 12)
+
+    test.case("and a source attaches without changing the rest")
+    let withsrc = dapstack.with_source(f, dapbrk.source_path("/tmp/a.nv"))
+    test.assert(withsrc.source.path == "/tmp/a.nv")
+    test.assert(withsrc.id == 3)
+
+@test
+fn test_an_expensive_scope_is_collapsed_by_default() [io]
+    // A globals scope of four thousand entries expanded by default is a
+    // frozen editor, and the adapter is the only party that knows the
+    // number in advance.
+    test.case("an ordinary scope is not expensive")
+    test.assert(not dapstack.scope("Locals", 3).expensive)
+
+    test.case("and one the adapter marks is")
+    let g = dapstack.expensive_scope("Globals", 4, 4000)
+    test.assert(g.expensive)
+    test.assert(g.named_variables == 4000)
+
+@test
+fn test_a_hover_evaluation_must_have_no_side_effects() [io]
+    // An adapter that called a function on a hover runs the user's code
+    // every time the cursor passes over it.
+    test.case("the five contexts the specification defines")
+    test.assert(list.len(dapstack.evaluate_contexts()) == 5)
+
+    test.case("hover and watch must not run anything")
+    test.assert(dapstack.must_be_side_effect_free("hover"))
+    test.assert(dapstack.must_be_side_effect_free("watch"))
+
+    test.case("repl and clipboard may, because the user typed them")
+    test.assert(not dapstack.must_be_side_effect_free("repl"))
+    test.assert(not dapstack.must_be_side_effect_free("clipboard"))
+
+    test.case("and an unknown context takes the safe answer")
+    test.assert(dapstack.must_be_side_effect_free("whatever"))
+
+    test.case("an evaluation is a rendered result and a type")
+    test.assert(dapstack.evaluation("4", "Int", 0).result == "4")
+
+@test
+fn test_resuming_kills_every_variables_reference() [io]
+    // A client that kept its expanded tree shows a user a panel full of
+    // other values, and nothing reports an error because the handles
+    // are valid and simply mean something else now.
+    test.case("continued and stopped both invalidate")
+    test.assert(dapevent.invalidates_references(DapContinuedEvent))
+    test.assert(dapevent.invalidates_references(DapStoppedEvent))
+
+    test.case("and an output or a thread event does not")
+    test.assert(not dapevent.invalidates_references(DapOutputEvent))
+    test.assert(not dapevent.invalidates_references(DapThreadEvent))
+
+@test
+fn test_exited_is_not_the_end_of_the_session_and_terminated_is() [io]
+    // A client that shut the session down on an `exited` loses the
+    // restart.
+    test.case("terminated ends it")
+    test.assert(dapevent.ends_session(DapTerminatedEvent))
+
+    test.case("exited does not: the adapter may still be alive")
+    test.assert(not dapevent.ends_session(DapExitedEvent))
+    test.assert(dapevent.exited(1).exit_code == 1)
+
+@test
+fn test_a_stopped_event_says_which_thread_and_whether_the_rest_stopped() [io]
+    test.case("the conservative default is that only this thread stopped")
+    let one = dapevent.stopped("breakpoint", 1)
+    test.assert(one.reason == "breakpoint")
+    test.assert(one.thread_id == 1)
+    test.assert(not one.all_threads_stopped)
+
+    test.case("and an adapter that stopped everything says so")
+    test.assert(dapevent.stopped_all("pause", 1).all_threads_stopped)
+
+    test.case("the breakpoints that fired are carried, for the highlight")
+    let hit = dapevent.with_hit_breakpoints(one, [3, 4])
+    test.assert(list.len(hit.hit_breakpoint_ids) == 2)
+
+@test
+fn test_the_output_category_decides_which_pane_it_goes_in() [io]
+    // An adapter that sent the program's stdout as "console" mixes its
+    // own messages into the program's output.
+    test.case("the four categories")
+    test.assert(list.len(dapevent.output_categories()) == 4)
+
+    test.case("stdout and stderr are the program's")
+    test.assert(dapevent.is_program_output("stdout"))
+    test.assert(dapevent.is_program_output("stderr"))
+
+    test.case("console is the adapter's own")
+    test.assert(not dapevent.is_program_output("console"))
+
+    test.case("and telemetry is not shown at all")
+    test.assert(not dapevent.is_user_visible("telemetry"))
+    test.assert(dapevent.is_user_visible("stdout"))
+    test.assert(dapevent.is_user_visible("console"))
+
+    test.case("an output body carries its text with the newlines it had")
+    test.assert(dapevent.output("stdout", "hello\n").output == "hello\n")
+
+@test
+fn test_the_event_names_round_trip_and_the_rest_keep_their_names() [io]
+    test.case("the names are the wire's")
+    test.assert(dapevent.event_name(DapInitializedEvent) == "initialized")
+    test.assert(dapevent.event_name(DapBreakpointEvent) == "breakpoint")
+
+    test.case("and they parse back")
+    test.assert(dapevent.event_name(dapevent.event_of("stopped")) == "stopped")
+
+    test.case("an event this package does not type keeps its name")
+    match dapevent.event_of("module")
+        DapUnknownEvent(n) => test.assert(n == "module")
+        _                  => test.fail("that is not typed here")
+
+@test
+fn test_the_two_small_event_bodies() [io]
+    test.case("a thread event says which and why")
+    let t = dapevent.thread_event("started", 2)
+    test.assert(t.reason == "started")
+    test.assert(t.thread_id == 2)
+
+    test.case("a breakpoint event carries the breakpoint, with its id")
+    // The id is the only thing tying the event to the breakpoint it is
+    // about; an adapter that assigned none sends events a client cannot
+    // act on.
+    let b = dapbrk.verified(5, dapbrk.source_path("/tmp/a.nv"), 12)
+    let ev = dapevent.breakpoint_event("changed", b)
+    test.assert(ev.reason == "changed")
+    test.assert(ev.breakpoint.id == 5)

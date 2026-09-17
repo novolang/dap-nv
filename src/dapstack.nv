@@ -1,0 +1,361 @@
+// dapstack.nv — threads, frames, scopes and variables, and the handle
+// that ties them together and expires.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE VARIABLES REFERENCE IS A HANDLE, AND IT DIES WHEN THE PROGRAM
+// MOVES
+//
+// A variable whose value is structured — a struct, a list, a map — does
+// not carry its children.  It carries a `variables_reference`, a
+// non-zero integer, and the client sends a `variables` request with it
+// to get them.  Zero means the value is a leaf and there is nothing to
+// expand.
+//
+// The rule that matters is the one implementations forget: EVERY
+// REFERENCE IS INVALIDATED WHEN EXECUTION RESUMES.  A `continue`, a
+// `next`, a `stepIn` or a `stepOut` makes every handle the client is
+// holding meaningless, and an adapter is free to reuse the numbers for
+// entirely different values.  A client that kept its expanded tree
+// across a step and asked again shows the user a variable panel full of
+// other people's data — and nothing reports an error, because the
+// numbers are valid, just not the ones it thinks.
+//
+// `dapcmd.resumes_execution` is the question a client asks before it
+// sends anything.  `dapstack.is_expandable` is what tells it which
+// values it was holding handles for.
+//
+// THE SAME HANDLE SPACE COVERS FRAMES, SCOPES AND VARIABLES
+//
+// A stack frame's `id`, a scope's `variables_reference` and a
+// variable's `variables_reference` are all drawn from one space of
+// numbers the adapter owns.  That is why a client cannot invent one and
+// why it must not keep one: the adapter assigns them, and the adapter
+// takes them back.
+//
+// THREAD IDS ARE THE EXCEPTION
+//
+// A thread's id is NOT in that space and is not invalidated by
+// stepping.  It is stable for the life of the thread, which is what
+// lets a client keep a thread selected across a step.
+
+use dapbrk
+
+// A thread of the program being debugged.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.thread(1, "main").name)              // main
+// ```
+pub struct DapThread
+    // The adapter's identifier for the thread.  STABLE for the
+    // thread's life, and NOT invalidated by stepping — unlike every
+    // other identifier in this module.
+    id: Int
+    // A name for display.
+    name: Str
+
+// One frame of a thread's stack.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.stack_frame(1, "main", 12).line}")   // 12
+// ```
+pub struct DapStackFrame
+    // The adapter's identifier for this frame.  In the same handle
+    // space as a variables reference, so it is invalidated when
+    // execution resumes.
+    id: Int
+    // A name for display: the function's name, usually with its
+    // arguments.
+    name: Str
+    // The source this frame is in, by path or by reference.
+    source: dapbrk.DapSource
+    // The line, ONE-based.
+    line: Int
+    // The column, one-based, or 0.
+    column: Int
+    // How the client should present a frame it cannot show source for:
+    // `"normal"`, `"label"` for a frame that is a heading rather than
+    // code, `"subtle"` for one to grey out.  Empty means normal.
+    presentation_hint: Str
+
+// A group of variables in a frame.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.scope("Locals", 3).name)             // Locals
+// ```
+pub struct DapScope
+    // A name for display: `"Locals"`, `"Arguments"`, `"Globals"`.
+    name: Str
+    // The handle to fetch this scope's variables with.  In the same
+    // space as everything else here, and invalidated the same way.
+    variables_reference: Int
+    // Whether the client should collapse this scope by default.  True
+    // for a scope that is large or rarely interesting — a globals
+    // scope of four thousand entries expanded by default is a frozen
+    // editor.
+    expensive: Bool
+    // How many variables the scope has, or 0 when the adapter does not
+    // say.  A client uses it to page a large scope rather than asking
+    // for all of it.
+    named_variables: Int
+
+// One variable, or one element, or one field.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.variable("n", "4", 0).value)         // 4
+// ```
+pub struct DapVariable
+    // The name, as the program spells it.  For an array element this
+    // is the index as a string, which is what makes a list and a
+    // struct one type here.
+    name: Str
+    // The value, ALREADY RENDERED as text by the adapter.  Not a JSON
+    // value: the adapter knows how the language prints a value and the
+    // client does not, so rendering on the client would print a novo
+    // enum the way JavaScript prints an object.
+    value: Str
+    // The type's name, for display, or `""`.
+    type_name: Str
+    // Non-zero when this value has children the client may fetch with
+    // a `variables` request.  ZERO for a leaf.  Invalidated when
+    // execution resumes.
+    variables_reference: Int
+    // How many of the children are named — the fields of a struct.
+    named_variables: Int
+    // How many of the children are indexed — the elements of a list.
+    // Separate from `named_variables` because a client pages an array
+    // of a million elements and lists a struct's fields whole.
+    indexed_variables: Int
+    // An expression that evaluates to this variable, for a client
+    // offering "copy as expression" or setting a data breakpoint on
+    // it.  Empty when the adapter cannot produce one.
+    evaluate_name: Str
+
+// What an `evaluate` request answers.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.evaluation("4", "Int", 0).result)    // 4
+// ```
+pub struct DapEvaluation
+    // The result, already rendered as text.
+    result: Str
+    // The type's name, or `""`.
+    type_name: Str
+    // Non-zero when the result has children to expand.  Invalidated
+    // when execution resumes, like every other handle.
+    variables_reference: Int
+
+// A thread.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.thread(1, "main").id}")           // 1
+// ```
+pub fn thread(id: Int, name: Str) -> DapThread []
+    todo("dap-nv.dapstack.thread")
+
+// A stack frame with no source.
+//
+// For a frame the adapter has no file for — a frame inside the runtime,
+// a frame whose source was optimised away.  `with_source` attaches one.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.stack_frame(1, "main", 12).name)     // main
+// ```
+pub fn stack_frame(id: Int, name: Str, line: Int) -> DapStackFrame []
+    todo("dap-nv.dapstack.stack_frame")
+
+// The same frame with a source attached.
+//
+// ```novo
+// use dapbrk
+// use dapstack
+//
+// fn main() [io]
+//     let f = dapstack.stack_frame(1, "main", 12)
+//     println(dapstack.with_source(f, dapbrk.source_path("/a.nv")).source.path)
+// ```
+pub fn with_source(f: DapStackFrame, source: dapbrk.DapSource) -> DapStackFrame []
+    todo("dap-nv.dapstack.with_source")
+
+// A scope.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.scope("Locals", 3).expensive}")   // false
+// ```
+pub fn scope(name: Str, variables_reference: Int) -> DapScope []
+    todo("dap-nv.dapstack.scope")
+
+// A scope the client should collapse by default.
+//
+// For one that is large or rarely interesting.  A globals scope of four
+// thousand entries expanded by default is a frozen editor, and the
+// adapter is the only party that knows the number in advance.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.expensive_scope("Globals", 4, 4000).expensive}")
+// ```
+pub fn expensive_scope(name: Str, variables_reference: Int, count: Int) -> DapScope []
+    todo("dap-nv.dapstack.expensive_scope")
+
+// A leaf variable: a value with nothing to expand.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.leaf("n", "4", "Int").variables_reference}")   // 0
+// ```
+pub fn leaf(name: Str, value: Str, type_name: Str) -> DapVariable []
+    todo("dap-nv.dapstack.leaf")
+
+// A variable with a reference, which may or may not be expandable.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.variable("xs", "[1, 2, 3]", 9).name)   // xs
+// ```
+pub fn variable(name: Str, value: Str, variables_reference: Int) -> DapVariable []
+    todo("dap-nv.dapstack.variable")
+
+// A structured variable with its child counts.
+//
+// The two counts are separate because a client pages an array of a
+// million elements and lists a struct's fields whole.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.structured("xs", "[…]", 9, 0, 1000000).indexed_variables}")
+// ```
+pub fn structured(name: Str, value: Str, variables_reference: Int, named: Int,
+                  indexed: Int) -> DapVariable []
+    todo("dap-nv.dapstack.structured")
+
+// The same variable with an expression that evaluates to it.
+//
+// For a client offering "copy as expression", or setting a data
+// breakpoint on it.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     let v = dapstack.leaf("x", "4", "Int")
+//     println(dapstack.with_evaluate_name(v, "self.x").evaluate_name)
+// ```
+pub fn with_evaluate_name(v: DapVariable, expression: Str) -> DapVariable []
+    todo("dap-nv.dapstack.with_evaluate_name")
+
+// An evaluation result.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println(dapstack.evaluation("4", "Int", 0).type_name)   // Int
+// ```
+pub fn evaluation(result: Str, type_name: Str, variables_reference: Int) -> DapEvaluation []
+    todo("dap-nv.dapstack.evaluation")
+
+// Whether a variable has children the client may fetch.
+//
+// Its reference is non-zero.  A client asks this to know which values
+// it was holding handles for, and therefore what to throw away when
+// execution resumes.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.is_expandable(dapstack.leaf("n", "4", "Int"))}")   // false
+// ```
+pub fn is_expandable(v: DapVariable) -> Bool []
+    todo("dap-nv.dapstack.is_expandable")
+
+// Whether a reference is one the adapter issued rather than the
+// "nothing here" value.
+//
+// Non-zero.  A function rather than a `!= 0` because zero is a
+// SENTINEL and not an identifier, and reading `is_live_reference(n)`
+// at a call site is what stops somebody storing a zero in a table of
+// handles.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.is_live_reference(0)}")           // false
+// ```
+pub fn is_live_reference(reference: Int) -> Bool []
+    todo("dap-nv.dapstack.is_live_reference")
+
+// The `evaluate` contexts the specification defines, as the wire spells
+// them.
+//
+// `"watch"`, `"repl"`, `"hover"`, `"clipboard"`, `"variables"`.  The
+// context changes what an adapter should do: a `hover` evaluation must
+// have no side effects at all, because the user only moved the mouse,
+// and a `repl` one may do anything the user typed.  An adapter that
+// ignored the context runs the user's function call every time the
+// cursor passes over it.
+//
+// ```novo
+// use std.list
+// use dapstack
+//
+// fn main() [io]
+//     println("${list.len(dapstack.evaluate_contexts())}")  // 5
+// ```
+pub fn evaluate_contexts() -> [Str] []
+    todo("dap-nv.dapstack.evaluate_contexts")
+
+// Whether an `evaluate` context requires the evaluation to be free of
+// side effects.
+//
+// True for `"hover"` and `"watch"`: the user did not ask for either to
+// run, and an adapter that called a function on a hover runs the user's
+// code every time the cursor passes over it.  False for `"repl"` and
+// `"clipboard"`, which the user typed.
+//
+// An unknown context answers TRUE, because the safe answer to "I do not
+// know why this is being evaluated" is not to let it do anything.
+//
+// ```novo
+// use dapstack
+//
+// fn main() [io]
+//     println("${dapstack.must_be_side_effect_free("hover")}")   // true
+//     println("${dapstack.must_be_side_effect_free("repl")}")    // false
+// ```
+pub fn must_be_side_effect_free(context: Str) -> Bool []
+    todo("dap-nv.dapstack.must_be_side_effect_free")

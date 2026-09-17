@@ -1,0 +1,319 @@
+// dapmsg.nv — the envelope, and the reason it is not JSON-RPC's.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// DAP LOOKS LIKE JSON-RPC AND IS NOT
+//
+// It travels behind the same `Content-Length` header, so this package
+// takes the framing from jsonrpc-nv.  The message inside is a different
+// protocol, and treating it as JSON-RPC is wrong in three places:
+//
+//   - the identifier is `seq`, not `id`, and it is PER SENDER rather
+//     than per request: every message a party sends consumes the next
+//     number in ITS OWN sequence, responses and events included.  A
+//     response names the request it answers in a separate member,
+//     `request_seq`.
+//   - there are THREE message types.  JSON-RPC has a request and a
+//     response; DAP has a request, a response and an EVENT, and an
+//     event is not a notification — it has a `seq` of its own and it
+//     comes only from the adapter.
+//   - failure is a BOOLEAN, `success: false`, beside the command and a
+//     short message, with the detail in a structured `Message` in the
+//     body.  There is no error code and no error object where JSON-RPC
+//     puts one.
+//
+// So `DapMessage` is declared here rather than borrowed, and the
+// dependency on jsonrpc-nv is the framing alone.
+//
+// THE SEQUENCE IS THE SENDER's AND IT IS NOT A HANDSHAKE
+//
+// Each party numbers its own messages from 1 upwards.  The two
+// sequences are independent: the client's request 4 may be answered by
+// the adapter's message 17.  What ties them together is `request_seq`,
+// and nothing else — so a client that matched responses by `seq`
+// matched them to whatever the adapter happened to be sending.
+//
+// A FAILED RESPONSE IS STILL A RESPONSE
+//
+// `success: false` carries the same `command` and the same
+// `request_seq`, so a client's table of outstanding requests is cleared
+// the same way whichever way the answer went.  An adapter that answered
+// a failure by sending nothing leaves the client waiting for ever.
+
+use std.json
+
+// One message on the wire, in either direction.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println(dapmsg.message_type_name(DapRequestMsg(dapmsg.request(1, "threads", None))))
+// ```
+pub enum DapMessage
+    // A request.  From either party: the client asks the adapter to
+    // do things, and the adapter asks the client for things such as
+    // `runInTerminal`.
+    DapRequestMsg(request: DapRequest)
+    // An answer to a request, successful or not.
+    DapResponseMsg(response: DapResponse)
+    // Something happened.  Only from the adapter, never answered, and
+    // it still consumes a sequence number.
+    DapEventMsg(event: DapEvent)
+
+// A request.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println(dapmsg.request(1, "threads", None).command)   // threads
+// ```
+pub struct DapRequest
+    // The sender's own sequence number for this message.
+    seq: Int
+    // What is being asked for: `"initialize"`, `"setBreakpoints"`,
+    // `"continue"`.
+    command: Str
+    // The arguments, or `None` when the command takes none.  An
+    // object, per the specification's schema.
+    arguments: ?JsonValueH
+
+// An answer.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.ok(2, 1, "threads", None).success}")   // true
+// ```
+pub struct DapResponse
+    // The sender's own sequence number for this message — NOT the
+    // request's.
+    seq: Int
+    // The `seq` of the request being answered.  The only thing that
+    // ties a response to a request; a client matching on `seq` matched
+    // on the wrong number.
+    request_seq: Int
+    // Whether the request succeeded.
+    success: Bool
+    // The command being answered, repeated from the request so a
+    // client can log a response without looking its request up.
+    command: Str
+    // A short machine-readable id when `success` is false, and `""`
+    // otherwise.  The detail is in `body`'s `error`.
+    message: Str
+    // The result, or the error detail, or `None`.  A successful
+    // response to a command that returns nothing has no body.
+    body: ?JsonValueH
+
+// Something that happened.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println(dapmsg.event(3, "initialized", None).event)   // initialized
+// ```
+pub struct DapEvent
+    // The adapter's own sequence number for this message.  An event
+    // consumes one, which is the fact a naive implementation misses
+    // when it numbers only its responses.
+    seq: Int
+    // What happened: `"stopped"`, `"output"`, `"terminated"`.
+    event: Str
+    // The event's detail, or `None`.
+    body: ?JsonValueH
+
+// The structured error the specification puts in a failed response's
+// body.
+//
+// A FORMAT STRING AND ITS VARIABLES, NOT A SENTENCE.  The adapter sends
+// `"cannot open {path}"` and `{"path": "/tmp/x"}` separately, so a
+// client can localise the message, group identical errors in a log, and
+// show the variables in a structured panel.  An adapter that
+// interpolated before sending has thrown all three away.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println(dapmsg.error_message(3, "cannot open {path}").format)
+// ```
+pub struct DapErrorMessage
+    // A unique identifier for this error, so a client can recognise it
+    // across localisations.
+    id: Int
+    // The message, with `{name}` placeholders.
+    format: Str
+    // Whether the client should show it to the user at all.  False for
+    // an error that is expected and handled — an adapter that set it
+    // true on every failure trains a user to dismiss the box.
+    show_user: Bool
+    // Whether the message may be sent to telemetry.  False when the
+    // variables may hold a path or a value from the user's program.
+    send_telemetry: Bool
+    // A URL where the error is explained, or `""`.
+    url: Str
+    // A label for that URL, shown as the link text.
+    url_label: Str
+
+// A request.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.request(1, "threads", None).seq}")  // 1
+// ```
+pub fn request(seq: Int, command: Str, arguments: ?JsonValueH) -> DapRequest []
+    todo("dap-nv.dapmsg.request")
+
+// A successful response to a request.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.ok(2, 1, "threads", None).request_seq}")   // 1
+// ```
+pub fn ok(seq: Int, request_seq: Int, command: Str, body: ?JsonValueH) -> DapResponse []
+    todo("dap-nv.dapmsg.ok")
+
+// A failed response to a request.
+//
+// STILL A RESPONSE, with the same `command` and `request_seq`, so the
+// client's table is cleared the same way whichever way the answer went.
+// An adapter that answered a failure by sending nothing leaves the
+// client waiting for ever.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     let e = dapmsg.error_message(1, "no such thread")
+//     println("${dapmsg.failed(2, 1, "threads", "noThread", e).success}")   // false
+// ```
+pub fn failed(seq: Int, request_seq: Int, command: Str, message: Str,
+              error: DapErrorMessage) -> DapResponse []
+    todo("dap-nv.dapmsg.failed")
+
+// An event.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.event(3, "terminated", None).seq}")  // 3
+// ```
+pub fn event(seq: Int, name: Str, body: ?JsonValueH) -> DapEvent []
+    todo("dap-nv.dapmsg.event")
+
+// An error message with the two fields that are always needed and the
+// defaults for the rest: shown to the user, not sent to telemetry, no
+// URL.
+//
+// `send_telemetry` defaults to FALSE because the variables may hold a
+// path from the user's machine or a value out of their program, and an
+// adapter that wants telemetry should say so at the site rather than
+// get it by omission.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.error_message(3, "cannot open {path}").send_telemetry}")
+// ```
+pub fn error_message(id: Int, format: Str) -> DapErrorMessage []
+    todo("dap-nv.dapmsg.error_message")
+
+// The format string with its variables substituted, for a client that
+// will not localise.
+//
+// `{name}` is replaced by the variable of that name; a placeholder with
+// no variable is left as it is, so a half-supplied set of variables
+// produces a readable message rather than a blank.
+//
+// ```novo
+// use std.json
+// use dapmsg
+//
+// fn main() [io]
+//     let e = dapmsg.error_message(3, "cannot open {path}")
+//     println(dapmsg.interpolate(e, json.object([])))
+// ```
+pub fn interpolate(e: DapErrorMessage, variables: JsonValueH) -> Str []
+    todo("dap-nv.dapmsg.interpolate")
+
+// The message's type as the wire spells it: `"request"`, `"response"`
+// or `"event"`.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println(dapmsg.message_type_name(DapEventMsg(dapmsg.event(1, "x", None))))
+// ```
+pub fn message_type_name(m: DapMessage) -> Str []
+    todo("dap-nv.dapmsg.message_type_name")
+
+// The sequence number a message carries, whichever kind it is.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.seq_of(DapRequestMsg(dapmsg.request(4, "x", None)))}")
+// ```
+pub fn seq_of(m: DapMessage) -> Int []
+    todo("dap-nv.dapmsg.seq_of")
+
+// The next sequence number a sender should use.
+//
+// One more than the last it sent, and 1 when it has sent nothing.  A
+// function rather than a `+ 1` because the case it gets right is the
+// first message: the specification starts the sequence at 1, and a
+// sender that started at 0 sends a message whose `seq` the
+// specification says no message has.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.next_seq(0)}")                      // 1
+//     println("${dapmsg.next_seq(4)}")                      // 5
+// ```
+pub fn next_seq(last_sent: Int) -> Int []
+    todo("dap-nv.dapmsg.next_seq")
+
+// Whether a response answers a request.
+//
+// The response's `request_seq` against the request's `seq`, and the
+// commands must match too — a mismatch means the adapter answered the
+// wrong request and a client that trusted it decodes the wrong body.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     let q = dapmsg.request(1, "threads", None)
+//     println("${dapmsg.answers(q, dapmsg.ok(9, 1, "threads", None))}")   // true
+// ```
+pub fn answers(q: DapRequest, r: DapResponse) -> Bool []
+    todo("dap-nv.dapmsg.answers")
+
+// Whether a message expects an answer.
+//
+// True for a request and false for the other two.  An adapter that
+// answered an event has sent a response nobody is waiting for; a
+// client that did not answer an adapter's request — `runInTerminal`,
+// `startDebugging` — leaves the adapter stuck.
+//
+// ```novo
+// use dapmsg
+//
+// fn main() [io]
+//     println("${dapmsg.expects_answer(DapEventMsg(dapmsg.event(1, "x", None)))}")
+// ```
+pub fn expects_answer(m: DapMessage) -> Bool []
+    todo("dap-nv.dapmsg.expects_answer")

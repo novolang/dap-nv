@@ -1,0 +1,299 @@
+// dapwire.nv — text to messages and back, and the framing this package
+// borrows rather than rewrites.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE FRAMING IS JSONRPC-NV's, AND THAT IS THE WHOLE OF THE DEPENDENCY
+//
+// The Debug Adapter Protocol puts the same header in front of every
+// message that the Language Server Protocol's base protocol does:
+// `Content-Length: <n>` in BYTES, a blank line, then the content.  So
+// `jrpcframe` is already the reader and the writer, and the reader here
+// is that one with a decode on the end of it.
+//
+// The message inside is not JSON-RPC, and `dapmsg`'s opening note says
+// why.  This module is where the two facts meet: the same envelope of
+// bytes, a different envelope of members.
+//
+// THE MESSAGE TYPE IS READ FROM `type`, NOT GUESSED FROM THE MEMBERS
+//
+// Every DAP message has a `type` member saying which of the three it
+// is.  A decoder that inferred the kind from which members are present
+// — a `command` makes it a request, a `success` makes it a response —
+// is wrong for a response, which has BOTH, and it is wrong silently.
+// `decode` reads `type` and refuses anything else.
+
+use std.json
+use jrpcframe
+use jrpcerr
+use dapmsg
+
+// What could not be decoded.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     println(dapwire.fault_name(DapNotJson))
+// ```
+pub enum DapFault
+    // The text is not JSON.
+    DapNotJson
+    // The JSON is not an object.
+    DapNotObject
+    // There is no `type` member, or it is not a string.
+    DapNoType
+    // The `type` is not `"request"`, `"response"` or `"event"`.
+    DapUnknownType(name: Str)
+    // A member the message's type requires is absent or is of the
+    // wrong type: `seq` on every message, `command` on a request,
+    // `request_seq` and `success` on a response, `event` on an event.
+    DapMissingMember(name: Str)
+    // A `seq` that is not a positive integer.  The specification
+    // starts the sequence at 1.
+    DapBadSeq
+    // The framing failed, which is a different thing: the byte stream
+    // is out of step and the connection has to be closed rather than
+    // resynchronised.  The inner fault is jsonrpc-nv's.
+    DapFramingFault(inner: jrpcerr.JrpcFault)
+
+// `DapFault` is an `Error`, which is what lets `Result<T, DapFault>`
+// exist at all (SPEC section 3.4).
+impl Error for DapFault
+    // The one-line message, for a log.
+    //
+    // A framing fault's message is jsonrpc-nv's own, prefixed, so a
+    // reader of the log sees which layer refused.
+    //
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("dap-nv.DapFault.message")
+
+// A reader and the one message that came out of it, if one did.
+pub struct DapStep
+    reader: DapReader
+    // `None` means "no complete message in what I have been given
+    // yet", which on a pipe is the ordinary case and not a fault.
+    message: ?dapmsg.DapMessage
+
+// The state between "some bytes turned up" and "here is a message".
+//
+// A `jrpcframe.JrpcReader` and nothing else: the framing is that
+// package's, and this type exists so a caller of this package never
+// has to name the other one.
+pub struct DapReader
+    frames: jrpcframe.JrpcReader
+
+// The reader limits, taken from jsonrpc-nv's defaults.
+//
+// A header section of 8 KiB and content of 32 MiB, which is what a
+// stack trace of a deeply recursive program and a `variables` response
+// over a large object actually need.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     println("${dapwire.pending_len(dapwire.reader())}")   // 0
+// ```
+pub fn reader() -> DapReader []
+    todo("dap-nv.dapwire.reader")
+
+// A reader with the limits named.
+//
+// For an adapter debugging a constrained target, where a 32 MiB message
+// is a memory exhaustion rather than a stack trace.
+//
+// ```novo
+// use jrpcframe
+// use dapwire
+//
+// fn main() [io]
+//     println("${dapwire.pending_len(dapwire.reader_with(jrpcframe.small_limits()))}")
+// ```
+pub fn reader_with(limits: jrpcframe.JrpcLimits) -> DapReader []
+    todo("dap-nv.dapwire.reader_with")
+
+// Adds bytes, and takes one message if the addition completed one.
+//
+// Takes ONE.  A read that completed three leaves two inside, and `take`
+// is what gets them; an adapter that fed and did not drain handles one
+// message per packet, which under a burst of breakpoint updates looks
+// like a hang.
+//
+// ```novo
+// use std.bytes
+// use dapwire
+//
+// fn main() [io]
+//     let wire = bytes.to_byte_list(bytes.from_str("Content-Length: 2\r\n\r\n{}"))
+//     match dapwire.feed(dapwire.reader(), wire)
+//         Err(_)   => println("a fault")
+//         Ok(step) =>
+//             match step.message
+//                 None    => println("partial")
+//                 Some(_) => println("a message")
+// ```
+pub fn feed(r: DapReader, bytes: [u8]) -> Result<DapStep, DapFault> []
+    todo("dap-nv.dapwire.feed")
+
+// Takes one message if a complete one is already buffered, adding
+// nothing.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     match dapwire.take(dapwire.reader())
+//         Err(_)   => println("a fault")
+//         Ok(step) =>
+//             match step.message
+//                 Some(_) => println("a message")
+//                 None    => println("nothing buffered")
+// ```
+pub fn take(r: DapReader) -> Result<DapStep, DapFault> []
+    todo("dap-nv.dapwire.take")
+
+// Tells the reader the peer closed, and takes the last message.
+//
+// A close with a half-read frame is `DapFramingFault` carrying
+// jsonrpc-nv's truncation; a close between messages answers `None` and
+// no fault, which is what an adapter exiting normally looks like.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     match dapwire.finish(dapwire.reader())
+//         Err(_)   => println("truncated")
+//         Ok(step) =>
+//             match step.message
+//                 Some(_) => println("one last message")
+//                 None    => println("a clean close")
+// ```
+pub fn finish(r: DapReader) -> Result<DapStep, DapFault> []
+    todo("dap-nv.dapwire.finish")
+
+// How many bytes the reader is holding that have not become a message.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     println("${dapwire.pending_len(dapwire.reader())}")   // 0
+// ```
+pub fn pending_len(r: DapReader) -> Int []
+    todo("dap-nv.dapwire.pending_len")
+
+// One message decoded from the text of one frame.
+//
+// Reads `type` and dispatches on it.  A decoder that inferred the kind
+// from which members are present is wrong for a response — which has
+// both a `command` and a `success` — and is wrong silently.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     match dapwire.decode("{\"seq\":1,\"type\":\"event\",\"event\":\"initialized\"}")
+//         Err(_) => println("a fault")
+//         Ok(_)  => println("an event")
+// ```
+pub fn decode(text: Str) -> Result<dapmsg.DapMessage, DapFault> []
+    todo("dap-nv.dapwire.decode")
+
+// One message decoded from a JSON value the caller already parsed.
+//
+// ```novo
+// use std.json
+// use dapwire
+//
+// fn main() [io]
+//     match json.parse("{\"seq\":1,\"type\":\"event\",\"event\":\"x\"}")
+//         None    => println("not json")
+//         Some(v) =>
+//             match dapwire.decode_value(v)
+//                 Err(_) => println("a fault")
+//                 Ok(_)  => println("an event")
+// ```
+pub fn decode_value(v: JsonValueH) -> Result<dapmsg.DapMessage, DapFault> []
+    todo("dap-nv.dapwire.decode_value")
+
+// One message as the text of one frame's content.
+//
+// No `Result`: every value of `DapMessage` is a message the
+// specification permits, because the constructors refused the ones that
+// are not.
+//
+// ```novo
+// use dapmsg
+// use dapwire
+//
+// fn main() [io]
+//     println(dapwire.encode(DapEventMsg(dapmsg.event(1, "initialized", None))))
+// ```
+pub fn encode(m: dapmsg.DapMessage) -> Str []
+    todo("dap-nv.dapwire.encode")
+
+// One message as the bytes to write, framing and all.
+//
+// The `Content-Length` header, the blank line and the content, with the
+// length in UTF-8 BYTES — which is `jrpcframe.frame`'s job and is the
+// reason it is borrowed rather than rewritten.
+//
+// ```novo
+// use std.list
+// use dapmsg
+// use dapwire
+//
+// fn main() [io]
+//     let m = DapEventMsg(dapmsg.event(1, "initialized", None))
+//     println("${list.len(dapwire.frame(m))}")
+// ```
+pub fn frame(m: dapmsg.DapMessage) -> [u8] []
+    todo("dap-nv.dapwire.frame")
+
+// One message as its JSON value.
+//
+// ```novo
+// use std.json
+// use dapmsg
+// use dapwire
+//
+// fn main() [io]
+//     let m = DapEventMsg(dapmsg.event(1, "x", None))
+//     println(json.stringify(dapwire.to_json(m)))
+// ```
+pub fn to_json(m: dapmsg.DapMessage) -> JsonValueH []
+    todo("dap-nv.dapwire.to_json")
+
+// The fault's name, stable across releases: `"not_json"`,
+// `"missing_member"`, `"framing_fault"`.
+//
+// Free of anything the peer sent, so it is safe as a metric label.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     println(dapwire.fault_name(DapBadSeq))                // bad_seq
+// ```
+pub fn fault_name(f: DapFault) -> Str []
+    todo("dap-nv.dapwire.fault_name")
+
+// Whether a fault leaves the byte stream out of step.
+//
+// True for `DapFramingFault` alone.  A message fault leaves the stream
+// in step, so an adapter answers an error and reads the next frame; a
+// framing fault does not, so the only correct response is to close.  An
+// adapter that kept reading has resynchronised on whatever bytes
+// happened to follow.
+//
+// ```novo
+// use dapwire
+//
+// fn main() [io]
+//     println("${dapwire.is_framing_fault(DapNotJson)}")    // false
+// ```
+pub fn is_framing_fault(f: DapFault) -> Bool []
+    todo("dap-nv.dapwire.is_framing_fault")

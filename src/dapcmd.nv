@@ -1,0 +1,309 @@
+// dapcmd.nv — the commands this package types, and the handshake whose
+// order everything depends on.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE CONFIGURATION HANDSHAKE, AND THE TRAP IN IT
+//
+// The start of a debug session is four steps and they are not in the
+// order a reader expects:
+//
+//   1. the client sends `initialize`; the adapter answers with its
+//      capabilities;
+//   2. the client sends `launch` or `attach` — and the adapter does
+//      NOT finish it yet;
+//   3. the adapter sends the `initialized` EVENT when it is ready to
+//      accept configuration.  The client then sends its breakpoints
+//      and finishes with `configurationDone`;
+//   4. only now does the adapter complete step 2's request and start
+//      the program.
+//
+// The trap is that `initialized` is an EVENT and it arrives after
+// `launch` was sent, not before.  An adapter that started the program
+// as soon as it received `launch` runs past every breakpoint the client
+// had not sent yet, and the bug shows up only on a fast machine.
+//
+// `dapcmd.phase_of` and `dapcmd.allows` are that sequence as values, so
+// an adapter refuses an out-of-order command instead of answering it in
+// a state where the answer is meaningless.
+//
+// THE COMMAND SET IS SCOPED, AND THE REST IS NAMED
+//
+// `DapCommand` has an arm for each command novodbg needs and one arm
+// carrying the name of everything else.  The commands left out are
+// listed in the README rather than discovered at the first body.
+
+// A command this package types, or one it does not.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println(dapcmd.command_name(DapThreadsCmd))           // threads
+// ```
+pub enum DapCommand
+    // `initialize`.  The first request; the adapter answers with its
+    // capabilities.
+    DapInitializeCmd
+    // `launch`.  Start a program under the debugger.
+    DapLaunchCmd
+    // `attach`.  Take over a program that is already running.
+    DapAttachCmd
+    // `configurationDone`.  The client has sent all its breakpoints;
+    // the adapter may now complete `launch` or `attach`.
+    DapConfigurationDoneCmd
+    // `setBreakpoints`.  Replaces EVERY breakpoint in one source file.
+    DapSetBreakpointsCmd
+    // `threads`.  What threads exist.
+    DapThreadsCmd
+    // `stackTrace`.  The frames of one thread.
+    DapStackTraceCmd
+    // `scopes`.  The scopes of one frame.
+    DapScopesCmd
+    // `variables`.  The children of one variables reference.
+    DapVariablesCmd
+    // `continue`.  Resume.
+    DapContinueCmd
+    // `next`.  Step over.
+    DapNextCmd
+    // `stepIn`.  Step into.
+    DapStepInCmd
+    // `stepOut`.  Step out.
+    DapStepOutCmd
+    // `evaluate`.  Evaluate an expression in a frame's context.
+    DapEvaluateCmd
+    // `disconnect`.  End the session.
+    DapDisconnectCmd
+    // Anything else, carrying the command name so an adapter can
+    // answer `success: false` with it or handle it itself.
+    DapUnknownCmd(name: Str)
+
+// Where in a session the two parties are.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.allows(DapBeforeInitialize, DapThreadsCmd)}")   // false
+// ```
+pub enum DapPhase
+    // Nothing has arrived.  Only `initialize` is accepted.
+    DapBeforeInitialize
+    // `initialize` has been answered.  `launch` or `attach` is
+    // expected, and the adapter has not yet sent the `initialized`
+    // event.
+    DapInitialized
+    // The `initialized` event has gone out and the client is sending
+    // its breakpoints.  `configurationDone` ends this phase.
+    DapConfiguring
+    // The program is running or stopped, and ordinary traffic flows.
+    DapRunning
+    // `disconnect` has been answered.  Nothing further is accepted.
+    DapDisconnected
+
+// What the adapter says it can do, in the parts this package covers.
+//
+// A client asks these before it sends anything optional: a
+// `configurationDone` sent to an adapter that does not support it is a
+// request answered `success: false`, and a client that assumed support
+// stalls waiting for the launch it will never see completed.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.default_capabilities().supports_configuration_done}")
+// ```
+pub struct DapCapabilities
+    // Whether the adapter supports `configurationDone`.  A client that
+    // sees this false must not send one, and the adapter completes the
+    // launch after the breakpoints instead — which is the older and
+    // racier protocol, and the reason the capability exists.
+    supports_configuration_done: Bool
+    // Whether a breakpoint may carry a condition expression.
+    supports_conditional_breakpoints: Bool
+    // Whether a breakpoint may carry a hit count condition.
+    supports_hit_conditional_breakpoints: Bool
+    // Whether `evaluate` accepts a `context` of `"hover"`, so an
+    // editor may evaluate what is under the cursor.
+    supports_evaluate_for_hovers: Bool
+    // Whether `disconnect` accepts `terminateDebuggee`, letting a
+    // client choose between killing the program and leaving it
+    // running.
+    supports_terminate_debuggee: Bool
+    // Whether the adapter can answer `stackTrace` with a page of
+    // frames rather than all of them.  Without it, a client asking
+    // about a deeply recursive program receives every frame.
+    supports_delayed_stack_trace_loading: Bool
+    // The exception filters the client may offer, by identifier.
+    // Empty when the adapter has none.
+    exception_filters: [Str]
+
+// The command's name as the wire spells it.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println(dapcmd.command_name(DapConfigurationDoneCmd))
+// ```
+pub fn command_name(c: DapCommand) -> Str []
+    todo("dap-nv.dapcmd.command_name")
+
+// The command a name denotes.
+//
+// Total: a name this package does not type answers `DapUnknownCmd`
+// carrying it, rather than an absence.  An adapter answering a failure
+// needs the name, and one implementing a command this package does not
+// type needs it too.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     match dapcmd.command_of("setExceptionBreakpoints")
+//         DapUnknownCmd(n) => println("not typed here: ${n}")
+//         _                => println("typed")
+// ```
+pub fn command_of(name: Str) -> DapCommand []
+    todo("dap-nv.dapcmd.command_of")
+
+// Whether the command is one this package types.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.is_typed_command("threads")}")      // true
+// ```
+pub fn is_typed_command(name: Str) -> Bool []
+    todo("dap-nv.dapcmd.is_typed_command")
+
+// Whether a command may be sent in this phase.
+//
+// The handshake as one function.  `initialize` only at the start;
+// `launch` and `attach` only once initialised; `setBreakpoints` while
+// configuring or running; the execution commands only while running;
+// `disconnect` at any time from `DapInitialized` onwards.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.allows(DapRunning, DapContinueCmd)}")           // true
+//     println("${dapcmd.allows(DapBeforeInitialize, DapContinueCmd)}")  // false
+// ```
+pub fn allows(phase: DapPhase, c: DapCommand) -> Bool []
+    todo("dap-nv.dapcmd.allows")
+
+// The phase a session moves to when a command is answered.
+//
+// `initialize` moves to `DapInitialized`; `configurationDone` moves to
+// `DapRunning`; `disconnect` moves to `DapDisconnected`; everything
+// else leaves the phase alone.  Sending the `initialized` EVENT is
+// what moves `DapInitialized` to `DapConfiguring`, and
+// `phase_after_initialized_event` is that step — it is an event and not
+// a command, which is the trap this module's opening note describes.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.allows(
+//         dapcmd.phase_after(DapBeforeInitialize, DapInitializeCmd),
+//         DapLaunchCmd)}")                                  // true
+// ```
+pub fn phase_after(phase: DapPhase, c: DapCommand) -> DapPhase []
+    todo("dap-nv.dapcmd.phase_after")
+
+// The phase after the adapter sends the `initialized` event.
+//
+// `DapConfiguring`, from `DapInitialized`, and unchanged from anywhere
+// else.  A separate function because the transition is caused by an
+// EVENT rather than by a command, and a state machine that only watched
+// commands never leaves `DapInitialized`.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.allows(
+//         dapcmd.phase_after_initialized_event(DapInitialized),
+//         DapSetBreakpointsCmd)}")                          // true
+// ```
+pub fn phase_after_initialized_event(phase: DapPhase) -> DapPhase []
+    todo("dap-nv.dapcmd.phase_after_initialized_event")
+
+// Whether the adapter may complete a `launch` or `attach` request yet.
+//
+// THE FUNCTION THE HANDSHAKE EXISTS FOR.  With
+// `supports_configuration_done`, the answer is no until
+// `configurationDone` has arrived — the phase is `DapRunning`.  Without
+// it, the client sends no `configurationDone` at all and the adapter
+// completes the launch once the breakpoints have stopped arriving,
+// which is the older protocol and is racy by construction.
+//
+// An adapter that started the program as soon as it received `launch`
+// runs past every breakpoint the client had not sent yet, and the bug
+// shows up only on a fast machine.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     let caps = dapcmd.default_capabilities()
+//     println("${dapcmd.may_complete_launch(DapConfiguring, caps)}")   // false
+// ```
+pub fn may_complete_launch(phase: DapPhase, capabilities: DapCapabilities) -> Bool []
+    todo("dap-nv.dapcmd.may_complete_launch")
+
+// Capabilities with everything off and no exception filters.
+//
+// The starting point an adapter narrows.  Turning a capability ON is a
+// statement that it is implemented, so the default that claims nothing
+// is the one that cannot lie: a client that believed a false claim
+// sends a request the adapter refuses, and the user sees a debugger
+// that does not work rather than one that does less.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.default_capabilities().supports_conditional_breakpoints}")
+// ```
+pub fn default_capabilities() -> DapCapabilities []
+    todo("dap-nv.dapcmd.default_capabilities")
+
+// Whether a command resumes execution.
+//
+// True for `continue`, `next`, `stepIn` and `stepOut`.  THE QUESTION
+// THAT INVALIDATES EVERY VARIABLES REFERENCE — see `dapstack`'s opening
+// note — so a client holding a tree of expanded variables asks this
+// before it sends anything and throws the tree away when the answer is
+// yes.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.resumes_execution(DapStepInCmd)}")  // true
+//     println("${dapcmd.resumes_execution(DapThreadsCmd)}") // false
+// ```
+pub fn resumes_execution(c: DapCommand) -> Bool []
+    todo("dap-nv.dapcmd.resumes_execution")
+
+// Whether a command is only meaningful while the program is stopped.
+//
+// True for `stackTrace`, `scopes`, `variables`, `evaluate` and the four
+// execution commands.  An adapter that answered `variables` while the
+// program was running read memory that was changing as it read it.
+//
+// ```novo
+// use dapcmd
+//
+// fn main() [io]
+//     println("${dapcmd.requires_stopped(DapVariablesCmd)}")   // true
+//     println("${dapcmd.requires_stopped(DapThreadsCmd)}")     // false
+// ```
+pub fn requires_stopped(c: DapCommand) -> Bool []
+    todo("dap-nv.dapcmd.requires_stopped")

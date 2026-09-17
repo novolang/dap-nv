@@ -1,0 +1,299 @@
+// dapmsg_tests.nv — the API suite for the envelope, the codec and the
+// framing.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: dap-nv.<module>.<fn>`.
+//
+// THE ASSERTIONS ARE THE THREE PLACES DAP DIFFERS FROM THE PROTOCOL IT
+// LOOKS LIKE: a per-sender sequence rather than a per-request id, three
+// message types rather than two, and a success boolean rather than an
+// error object.  A reader who assumed JSON-RPC gets all three wrong,
+// and these are what catch it.
+
+use std.test
+use std.list
+use std.json
+use std.bytes
+use jrpcframe
+use dapmsg
+use dapwire
+
+// Text as the byte list a reader is fed.
+fn u8s(text: Str) -> [u8]
+    bytes.to_byte_list(bytes.from_str(text))
+
+// One message's text, framed the way the wire carries it.
+fn framed(content: Str) -> [u8]
+    u8s("Content-Length: ${jrpcframe.content_length(content)}\r\n\r\n${content}")
+
+@test
+fn test_the_sequence_is_per_sender_and_starts_at_one() [io]
+    // A sender that started at 0 sends a message whose `seq` the
+    // specification says no message has.
+    test.case("the first message is 1")
+    test.assert(dapmsg.next_seq(0) == 1)
+
+    test.case("and each one after is the next")
+    test.assert(dapmsg.next_seq(4) == 5)
+
+    test.case("every message type consumes one, events included")
+    test.assert(dapmsg.seq_of(DapRequestMsg(dapmsg.request(4, "threads", None))) == 4)
+    test.assert(dapmsg.seq_of(DapResponseMsg(dapmsg.ok(5, 4, "threads", None))) == 5)
+    test.assert(dapmsg.seq_of(DapEventMsg(dapmsg.event(6, "stopped", None))) == 6)
+
+@test
+fn test_a_response_is_tied_to_its_request_by_request_seq() [io]
+    // A client matching on `seq` matched on whatever the adapter
+    // happened to be sending.
+    let q = dapmsg.request(1, "threads", None)
+
+    test.case("the adapter's own seq is unrelated to the request's")
+    let r = dapmsg.ok(17, 1, "threads", None)
+    test.assert(r.seq == 17)
+    test.assert(r.request_seq == 1)
+    test.assert(dapmsg.answers(q, r))
+
+    test.case("a different request_seq does not answer it")
+    test.assert(not dapmsg.answers(q, dapmsg.ok(17, 2, "threads", None)))
+
+    test.case("and neither does a different command, which would decode wrong")
+    test.assert(not dapmsg.answers(q, dapmsg.ok(17, 1, "stackTrace", None)))
+
+@test
+fn test_a_failed_response_is_still_a_response() [io]
+    // An adapter that answered a failure by sending nothing leaves the
+    // client waiting for ever.
+    let q = dapmsg.request(1, "threads", None)
+    let e = dapmsg.error_message(3, "no such thread {id}")
+    let r = dapmsg.failed(9, 1, "threads", "noThread", e)
+
+    test.case("it carries the same command and request_seq")
+    test.assert(dapmsg.answers(q, r))
+    test.assert(r.command == "threads")
+
+    test.case("and says what went wrong in two fields, not one")
+    test.assert(not r.success)
+    test.assert(r.message == "noThread")
+
+@test
+fn test_an_error_is_a_format_string_and_its_variables() [io]
+    // An adapter that interpolated before sending threw away the
+    // client's ability to localise, to group identical errors, and to
+    // show the variables separately.
+    let e = dapmsg.error_message(3, "cannot open {path}")
+
+    test.case("the format keeps its placeholders")
+    test.assert(e.format == "cannot open {path}")
+    test.assert(e.id == 3)
+
+    test.case("telemetry is off by default, because a variable may be a path")
+    test.assert(not e.send_telemetry)
+
+    test.case("interpolating substitutes what it has")
+    let vars = json.object([json.string("path"), json.string("/tmp/x")])
+    test.assert(dapmsg.interpolate(e, vars) == "cannot open /tmp/x")
+
+    test.case("and leaves a placeholder with no variable alone")
+    test.assert(dapmsg.interpolate(e, json.object([])) == "cannot open {path}")
+
+@test
+fn test_only_a_request_expects_an_answer() [io]
+    // An adapter that answered an event sent a response nobody waits
+    // for; a client that did not answer the adapter's request leaves it
+    // stuck.
+    test.case("a request does")
+    test.assert(dapmsg.expects_answer(DapRequestMsg(dapmsg.request(1, "x", None))))
+
+    test.case("a response and an event do not")
+    test.assert(not dapmsg.expects_answer(
+        DapResponseMsg(dapmsg.ok(2, 1, "x", None))))
+    test.assert(not dapmsg.expects_answer(
+        DapEventMsg(dapmsg.event(3, "stopped", None))))
+
+@test
+fn test_the_three_type_names_are_the_wires() [io]
+    test.case("request, response and event")
+    test.assert(dapmsg.message_type_name(
+        DapRequestMsg(dapmsg.request(1, "x", None))) == "request")
+    test.assert(dapmsg.message_type_name(
+        DapResponseMsg(dapmsg.ok(2, 1, "x", None))) == "response")
+    test.assert(dapmsg.message_type_name(
+        DapEventMsg(dapmsg.event(3, "x", None))) == "event")
+
+@test
+fn test_the_kind_is_read_from_type_and_not_inferred() [io]
+    // A decoder that inferred the kind from which members are present
+    // is wrong for a response, which has both a `command` and a
+    // `success`, and it is wrong silently.
+    test.case("an event")
+    match dapwire.decode("{\"seq\":1,\"type\":\"event\",\"event\":\"initialized\"}")
+        Err(_) => test.fail("that is a legal event")
+        Ok(m)  => test.assert(dapmsg.message_type_name(m) == "event")
+
+    test.case("a response, which has a command AND a success")
+    let resp = "{\"seq\":2,\"type\":\"response\",\"request_seq\":1,\"success\":true,\"command\":\"threads\"}"
+    match dapwire.decode(resp)
+        Err(_) => test.fail("that is a legal response")
+        Ok(m)  => test.assert(dapmsg.message_type_name(m) == "response")
+
+    test.case("a type the specification does not define is refused by name")
+    match dapwire.decode("{\"seq\":1,\"type\":\"notification\",\"event\":\"x\"}")
+        Ok(_)  => test.fail("there are three message types")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapUnknownType("")))
+
+    test.case("and a message with no type at all is DapNoType")
+    match dapwire.decode("{\"seq\":1,\"event\":\"x\"}")
+        Ok(_)  => test.fail("`type` is required")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapNoType))
+
+@test
+fn test_the_decoder_refuses_what_the_schema_requires() [io]
+    test.case("text that is not JSON")
+    match dapwire.decode("not json")
+        Ok(_)  => test.fail("that is not json")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapNotJson))
+
+    test.case("JSON that is not an object")
+    match dapwire.decode("4")
+        Ok(_)  => test.fail("a bare number is not a message")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapNotObject))
+
+    test.case("a request with no command")
+    match dapwire.decode("{\"seq\":1,\"type\":\"request\"}")
+        Ok(_)  => test.fail("a request has a command")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapMissingMember("")))
+
+    test.case("a response with no request_seq")
+    match dapwire.decode("{\"seq\":2,\"type\":\"response\",\"success\":true,\"command\":\"x\"}")
+        Ok(_)  => test.fail("a response names the request it answers")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapMissingMember("")))
+
+    test.case("a seq of zero, because the sequence starts at 1")
+    match dapwire.decode("{\"seq\":0,\"type\":\"event\",\"event\":\"x\"}")
+        Ok(_)  => test.fail("0 is not a sequence number")
+        Err(f) => test.assert(dapwire.fault_name(f)
+                              == dapwire.fault_name(DapBadSeq))
+
+@test
+fn test_a_message_round_trips_through_the_codec() [io]
+    test.case("an event")
+    let ev = DapEventMsg(dapmsg.event(3, "terminated", None))
+    match dapwire.decode(dapwire.encode(ev))
+        Err(_) => test.fail("this package's own output decodes")
+        Ok(m)  =>
+            test.assert(dapmsg.seq_of(m) == 3)
+            test.assert(dapmsg.message_type_name(m) == "event")
+
+    test.case("a request")
+    let rq = DapRequestMsg(dapmsg.request(1, "stackTrace", None))
+    match dapwire.decode(dapwire.encode(rq))
+        Err(_) => test.fail("this package's own output decodes")
+        Ok(m)  => test.assert(dapmsg.message_type_name(m) == "request")
+
+    test.case("and it has a JSON form the caller can inspect")
+    test.assert(json.type_of(dapwire.to_json(ev)) == "object")
+
+    test.case("which decodes back, for a transport that hands over values")
+    match dapwire.decode_value(dapwire.to_json(ev))
+        Err(_) => test.fail("this package's own output decodes")
+        Ok(m)  => test.assert(dapmsg.seq_of(m) == 3)
+
+@test
+fn test_the_framing_is_jsonrpc_nvs_and_a_message_may_arrive_in_pieces() [io]
+    let content = "{\"seq\":1,\"type\":\"event\",\"event\":\"initialized\"}"
+
+    test.case("a prefix produces no message and no fault")
+    match dapwire.feed(dapwire.reader(), u8s("Content-Len"))
+        Err(_)   => test.fail("a prefix is not a fault")
+        Ok(step) =>
+            match step.message
+                Some(_) => test.fail("that is not a whole frame")
+                None    => test.assert(dapwire.pending_len(step.reader) == 11)
+
+    test.case("the whole frame produces exactly one message")
+    match dapwire.feed(dapwire.reader(), framed(content))
+        Err(_)   => test.fail("that is a complete frame")
+        Ok(step) =>
+            match step.message
+                None    => test.fail("that is a complete frame")
+                Some(m) => test.assert(dapmsg.message_type_name(m) == "event")
+
+@test
+fn test_feed_takes_one_and_take_gets_the_rest() [io]
+    // An adapter that fed and did not drain handles one message per
+    // packet, which under a burst of breakpoint updates looks like a
+    // hang.
+    let a = "{\"seq\":1,\"type\":\"event\",\"event\":\"initialized\"}"
+    let b = "{\"seq\":2,\"type\":\"event\",\"event\":\"terminated\"}"
+
+    test.case("feed answers the first")
+    match dapwire.feed(dapwire.reader(), list.concat(framed(a), framed(b)))
+        Err(_)   => test.fail("two frames are not a fault")
+        Ok(step) =>
+            match step.message
+                None    => test.fail("the first frame is complete")
+                Some(m) =>
+                    test.assert(dapmsg.seq_of(m) == 1)
+
+                    test.case("and take answers the second")
+                    match dapwire.take(step.reader)
+                        Err(_)    => test.fail("the second frame is complete")
+                        Ok(step2) =>
+                            match step2.message
+                                None     => test.fail("the second frame is complete")
+                                Some(m2) => test.assert(dapmsg.seq_of(m2) == 2)
+
+@test
+fn test_a_framing_fault_means_close_and_a_message_fault_does_not() [io]
+    // A message fault leaves the byte stream in step, so an adapter
+    // answers and reads on.  A framing fault does not, so an adapter
+    // that kept reading resynchronised on whatever bytes followed.
+    test.case("a bad Content-Length is a framing fault")
+    match dapwire.feed(dapwire.reader(), u8s("Content-Length: banana\r\n\r\n"))
+        Ok(_)  => test.fail("banana is not a length")
+        Err(f) => test.assert(dapwire.is_framing_fault(f))
+
+    test.case("and a message that is not JSON is not")
+    test.assert(not dapwire.is_framing_fault(DapNotJson))
+    test.assert(not dapwire.is_framing_fault(DapBadSeq))
+
+@test
+fn test_a_close_mid_frame_is_a_truncation_and_a_clean_close_is_not() [io]
+    test.case("a close with nothing buffered is an ordinary end")
+    match dapwire.finish(dapwire.reader())
+        Err(_)   => test.fail("a clean close is not a fault")
+        Ok(step) =>
+            match step.message
+                Some(_) => test.fail("nothing was buffered")
+                None    => test.assert(true)
+
+    test.case("a close with a half-read frame is a framing fault")
+    match dapwire.feed(dapwire.reader(), u8s("Content-Length: 40\r\n\r\n{}"))
+        Err(_)   => test.fail("a prefix is not a fault")
+        Ok(step) =>
+            match dapwire.finish(step.reader)
+                Ok(_)  => test.fail("40 bytes were promised and 2 arrived")
+                Err(f) => test.assert(dapwire.is_framing_fault(f))
+
+@test
+fn test_a_message_frames_to_the_bytes_the_wire_carries() [io]
+    test.case("the framed bytes are longer than the content")
+    let m = DapEventMsg(dapmsg.event(1, "initialized", None))
+    test.assert(list.len(dapwire.frame(m)) > jrpcframe.content_length(dapwire.encode(m)))
+
+    test.case("and framing then feeding gives the message back")
+    match dapwire.feed(dapwire.reader(), dapwire.frame(m))
+        Err(_)   => test.fail("this package's own output decodes")
+        Ok(step) =>
+            match step.message
+                None       => test.fail("that is a complete frame")
+                Some(back) => test.assert(dapmsg.seq_of(back) == 1)
+
+    test.case("a reader with named limits reads the same way")
+    test.assert(dapwire.pending_len(dapwire.reader_with(jrpcframe.small_limits())) == 0)

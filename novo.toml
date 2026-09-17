@@ -1,0 +1,56 @@
+[package]
+name        = "dap-nv"
+version     = "0.0.1"
+description = "Debug Adapter Protocol 1.x as typed values: the three-message envelope with its per-sender sequence numbers, breakpoints that report where they actually landed, the variables reference and the rule that invalidates it, and the configuration handshake — over the Content-Length framing jsonrpc-nv already carries.  No transport.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A debug adapter starts processes, reads memory and talks to
+# an editor over a pipe — and none of that is here.  This package is
+# the protocol's VALUES: a message decoded from text the caller already
+# has, and a response encoded into text the caller will send.  Every
+# public function's effect row is `[]`, and the adapter that uses it
+# (novodbg) is where the `[io]` and the `[hw]` live.
+layer       = "core"
+
+category    = "tooling"
+
+tags        = ["dap", "debug-adapter-protocol", "debugger", "tooling", "framing", "sans-io"]
+repository  = "https://github.com/novolang/dap-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.9.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Debug Adapter Protocol 1.x as typed values"
+
+[dependencies]
+# jsonrpc-nv supplies the FRAMING and nothing else.
+#
+# The Debug Adapter Protocol puts the same header in front of every
+# message that the Language Server Protocol's base protocol does —
+# `Content-Length` in bytes, a blank line, then the content — so
+# `jrpcframe` is exactly the reader and writer this package needs, and
+# a second copy of it would be a second set of bugs in the one place a
+# mistake desynchronises a stream.
+#
+# What this package does NOT take from it is the message envelope.  DAP
+# looks like JSON-RPC and is not: it has `seq` where JSON-RPC has `id`,
+# three message types where JSON-RPC has two, and a `success` boolean
+# where JSON-RPC has an error object.  Typing a DAP message as a
+# `JrpcRequest` would be wrong in all three places, so `dapmsg` declares
+# its own envelope and says so.  `core`, so the layer rule holds.
+#
+# A PATH dependency while both packages are being staged: nothing is on
+# the registry yet, and a path that resolves to a sibling directory is
+# the only thing that resolves at all.  The publish round rewrites it to
+# `^0.0.1` before the tarball is built.
+jsonrpc-nv = { path = "../jsonrpc-nv" }
