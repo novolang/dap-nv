@@ -53,4 +53,4 @@ novo        = ">= 0.9.0"
 # the registry yet, and a path that resolves to a sibling directory is
 # the only thing that resolves at all.  The publish round rewrites it to
 # `^0.0.1` before the tarball is built.
-jsonrpc-nv = { path = "../jsonrpc-nv" }
+jsonrpc-nv = "^0.0.1"
