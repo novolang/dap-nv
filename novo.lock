@@ -3,6 +3,6 @@
 [jsonrpc-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "d1570da0b2a9acd037e1abd3d566271f5617dd7f192949553a9efc3732321f51"
+req = "^0.1.0"
+version = "0.1.0"
+hash = "71fbfd7709a9a4b41627aa3c5d5471288f151cbb4bcc606382bb2f0d5be08dc0"

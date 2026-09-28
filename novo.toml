@@ -1,6 +1,6 @@
 [package]
 name        = "dap-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Debug Adapter Protocol 1.x as typed values: the three-message envelope with its per-sender sequence numbers, breakpoints that report where they actually landed, the variables reference and the rule that invalidates it, and the configuration handshake — over the Content-Length framing jsonrpc-nv already carries.  No transport.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -53,4 +53,4 @@ novo        = ">= 0.9.0"
 # the registry yet, and a path that resolves to a sibling directory is
 # the only thing that resolves at all.  The publish round rewrites it to
 # `^0.0.1` before the tarball is built.
-jsonrpc-nv = "^0.0.1"
+jsonrpc-nv = "^0.1.0"
